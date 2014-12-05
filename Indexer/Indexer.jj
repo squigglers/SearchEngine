@@ -1,0 +1,231 @@
+options
+{
+	JDK_VERSION = "1.5";
+	IGNORE_CASE = true;
+	UNICODE_INPUT = true;
+	static = false;
+}
+
+PARSER_BEGIN(Indexer)
+
+import java.io.File;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.util.HashMap;
+import java.util.Scanner;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+
+public class Indexer
+{
+	public static void main(String args []) throws ParseException, FileNotFoundException, IOException
+	{
+	  	//initialize GlobalHashTable
+		int localHTsize = 3304;
+		int globalHTsize = 43810;
+		GlobalHashTable globalHT = new GlobalHashTable(globalHTsize);
+	  	
+	  	//input/output files/directories
+	  	String inputDir = args[0];
+	  	String outputDir = args[1];
+	  	if(inputDir.charAt(inputDir.length()-1) != '/')	//add forward slash if no forward slash
+	  		inputDir = inputDir + '/';
+	  	if(outputDir.charAt(outputDir.length()-1) != '/')
+	  		outputDir = outputDir + '/';
+	  	String dictFilename = outputDir + "dict.txt";
+	  	String postFilename = outputDir + "post.txt";
+	  	String mapFilename = outputDir + "map.txt";
+
+		BufferedWriter mapFile = new BufferedWriter(new FileWriter(mapFilename)); //map printing
+		
+		//get words from stoplist and fill in stoplistHt
+		String stoplistFilename = "stoplist.txt";
+		HashMap<String, String> stoplistHt = new HashMap<String, String>(1000);
+		populateStoplistHt(stoplistFilename, stoplistHt);
+		 
+		//go through all files from input directory
+		StringBuffer mapBuffer = new StringBuffer();	//stores all the doc names to write to map file
+		int docID = 0;		//keeps track of which docID we're on
+	  	File folder = new File(inputDir);
+	  	File[] allFiles = folder.listFiles();
+
+	  	for(File inFile: allFiles)
+	  	{
+	  		if(inFile.isFile())
+	  		{
+				//reads tokens from file and stores them in localHT
+				LocalHashTable localHT = new LocalHashTable(localHTsize);
+	  		  	Indexer parser = new Indexer(new BufferedReader(new FileReader(inFile)));
+				parser.Start(localHT, stoplistHt);
+
+				//insert local hashtable into global hashtable
+				globalHT.Insert(docID, localHT);
+				docID++;
+
+				//output file to map
+				String mapOutput = String.format("%-11s", inFile.getName());
+				mapFile.write(mapOutput + "\n");
+	  		}
+	  	}
+
+		//writes doc names in mapBuffer to map file
+		mapFile.write(mapBuffer.toString());
+
+		//store total number of documents in globalHT
+		globalHT.setNumDocsInCollection(allFiles.length);
+		
+	  	//write out global hashtable to dict and post
+	  	globalHT.Print(dictFilename, postFilename);
+
+	  	//close map file
+	  	mapFile.close();
+	}
+
+	//fills a hashtable from the stoplist
+	public static void populateStoplistHt(String filename, HashMap<String, String> ht)
+	{
+		try {
+			Scanner in = new Scanner(new FileReader(filename));
+			
+			while(in.hasNextLine())
+				ht.put(in.nextLine().toLowerCase(), "");
+			
+			in.close();
+		} catch (FileNotFoundException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+	}
+}
+
+PARSER_END(Indexer)
+
+//handles HTML tags and similar
+SKIP:
+{
+	//special cases
+	< ("<")+ ~["!", "a"-"z", "A"-"Z", "<", "/", "?"] >	// "<" not followed immediately by a letter is not an html tag
+| 	< "&" (["#", "a"-"z", "A"-"Z"])+ ";" >	//removes HTML entities (e.g. &nbsp;)
+
+  	//ignores everything
+| 	"<!--": IN_COMMENTS					//ignores comments
+|	"<script": IN_SCRIPT				//ignores everything between script tags
+|	"<noscript" : IN_NOSCRIPT			//ignores everything between noscript tags
+|	"<style": IN_STYLE					//I'm fashionable!
+| 	< ("<")+ >: IN_HTML					//ignores all other html (<<html> counts) 
+
+|	< OTHER: ~["a"-"z", "A"-"Z", "0"-"9"] >	//ignore non-alphanumeric chars
+| 	< CHAR1: < CHAR > >	//ignore single characters
+
+	//ignore numbers with commas and colons
+|	< (< NUM >)+ (("," | ":") (< NUM >)+)+ >
+
+}
+
+//skip everything in comments - <!-- to -- >
+< IN_COMMENTS > SKIP:
+{
+	"-->": DEFAULT
+| 	< ~[] >
+}
+
+//skip everything in scripts - <script> to </script>
+< IN_SCRIPT > SKIP:
+{
+	"</script>": DEFAULT
+|	< ~[] >
+}
+
+//skip everything in noscripts - <noscript> to </noscript>
+< IN_NOSCRIPT > SKIP:
+{
+	"</noscript>": DEFAULT
+|	< ~[] >
+}
+
+//skip everything in styles - <style> to </style> 
+< IN_STYLE > SKIP:
+{
+	"</style>": DEFAULT
+|	< ~[] >
+}
+
+//skip everything between html tags < to >
+< IN_HTML > SKIP:
+{
+ 	">": DEFAULT
+| 	< ~[] >
+}
+
+TOKEN:
+{
+  	//phone numbers in the format of 111-111-1111, (111)111-1111, (111) 111-1111, or 111 111-1111
+  	< PHONE_NUM: (< NUM >){3} "-" (< NUM >){3} "-" (< NUM >){4}
+  				| "(" (< NUM >){3} ")" (< NUM >){3} "-" (< NUM >){4}
+  				| "(" (< NUM >){3} ") " (< NUM >){3} "-" (< NUM >){4}
+  				| (< NUM >){3} " " (< NUM >){3} "-" (< NUM >){4} >
+
+  	//URL cases outside of <a href>
+  	//note: urls without a prefix (google.com instead of www.google.com) are covered by < TEXT >
+|	< URL: ("http" | "www") (~[" ", "\n", "\r", "\t", "<"])* >
+
+	//numbers with forward slashes (e.g. dates)
+|	< NUM_SLASH : (< NUM >)+ ("/" (< NUM >)+)+ >
+	
+	//all other text
+|  	< TEXT: < CHAR > ((< PUNC_INTEXT >)* (< CHAR >)+)+ >
+|  	< #CHAR: ["A"-"Z", "a"-"z", "0"-"9"] >
+| 	< #NUM: ["0"-"9"] >
+| 	< #PUNC_INTEXT: "-" | "." | "@" | "\'" | "_" >
+
+	//deals with stuff like <b>sgauch</b>@uark.edu or h<sub>2</sub>o
+| 	< FORMATTED_TEXT: < TEXT > ((< FORMATTING >)+ (< PUNC_INTEXT >)* < TEXT >)+ >
+| 	< #FORMATTING: "<b>" | "<em>" | "<i>" | "<small>" | "<strong>"
+				| "<sub>" | "<sup>" | "<ins>" | "<del>" | "<mark>"
+				| "</b>" | "</em>" | "</i>" | "</small>" | "</strong>"
+				| "</sub>" | "</sup>" | "</ins>" | "</del>" | "</mark>" >
+}
+
+//read tokens and appends them to buffer
+void Start(LocalHashTable ht, HashMap<String, String> stoplistHt):
+{
+  	Token t;
+  	String a;
+}
+{
+	(
+	  	//all other text (in or outside of brackets)
+	  	(
+		  	(t = < TEXT > | t = < PHONE_NUM > | t = < NUM_SLASH >)
+		  	{
+		  	  	a = t.image.toLowerCase();
+		  	  	if(!stoplistHt.containsKey(a))
+		  	  		ht.Insert(a);
+	  		}
+		)
+		|
+		//deals with stuff like <b>sgauch</b>@uark.edu or h<sub>2</sub>o
+		(
+		  	(t = < FORMATTED_TEXT >)
+		  	{
+		  	  	a = t.image.toLowerCase();
+		  	  	a = a.replaceAll("<.*?>", "");
+		  	  	if(!stoplistHt.containsKey(a))
+		  	  		ht.Insert(a);
+		  	}
+		)
+		|
+		//do not lowercase URLs
+		(
+		  	(t = < URL >)
+		  	{
+		  	  	a = t.image;
+		  		if(!stoplistHt.containsKey(a))
+		  			ht.Insert(a);
+		  	}
+		) 
+	)*
+	< EOF >
+}
