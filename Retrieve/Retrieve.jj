@@ -1,0 +1,336 @@
+options
+{
+	JDK_VERSION = "1.5";
+	IGNORE_CASE = true;
+	UNICODE_INPUT = true;
+	static = false;
+}
+
+PARSER_BEGIN(Retrieve)
+
+import java.io.*;
+import java.util.*;
+import java.nio.channels.FileChannel;
+
+public class Retrieve
+{
+  	//constant variables relating to the dict, post, and map files
+  	final static String DICTFILENAME = "dict.txt";
+  	final static String POSTFILENAME = "post.txt";
+  	final static String MAPFILENAME = "map.txt";
+  	final static long NUMDOCS = 1683;
+  	final static long DICTRECORDSNUM = 43810 * 3;
+  	final static long DICTRECORDSIZE = 33;
+  	final static long POSTRECORDSIZE = 13;
+  	final static long MAPRECORDSIZE = 12;
+  	final static String BLANKTOKEN = "blankblankblank";
+  	final static int NUMRESULTS = 10;
+  	  	
+	public static void main(String[] args) throws ParseException, FileNotFoundException, IOException
+	{	  	
+	  	//change command line arguments into a single string query
+	  	StringBuilder querySB = new StringBuilder();
+	  	for(String s: args)
+	  		querySB.append(s + " ");
+	  	String query = querySB.toString().trim();
+
+		//parse the query and store tokens in arraylist tokens
+		ArrayList<String> tokens = new ArrayList<String>();
+	  	java.io.StringReader sr = new java.io.StringReader(query);
+		java.io.Reader r = new java.io.BufferedReader(sr); 
+		Retrieve parser = new Retrieve(r);
+		parser.Start(tokens);
+
+		//make accumulator to store accumulated weights and initialize to 0
+		ArrayList<Weight> acc = new ArrayList<Weight>((int)NUMDOCS);
+		for(int i = 0; i < NUMDOCS; i++)
+			acc.add(new Weight(i, (long)0));
+
+		//process dict and post files
+		processDict(tokens, acc);
+		
+		//sort the accumulator by decreasing weight
+		Collections.sort(acc, Collections.reverseOrder());
+		
+		//present results to the user
+		printResults(acc);
+	}
+
+	//print out the top results
+	public static void printResults(ArrayList<Weight> acc) throws IOException, FileNotFoundException
+	{
+	  	//open map file
+	  	RandomAccessFile mapFile = new RandomAccessFile(MAPFILENAME, "r");
+
+		//print results
+		boolean hasResults = false;
+	  	for(int i = 0; i < NUMRESULTS && acc.get(i).weight != 0; i++)
+	  	{ 		
+	  	  	//find and seek to location in map file
+	  	  	long loc = acc.get(i).docid * MAPRECORDSIZE;
+	  	  	mapFile.seek(loc);
+
+			//print filename and weight to user
+			System.out.print(mapFile.readLine() + " " + acc.get(i).weight + " ");
+
+			hasResults = true;
+	  	}
+/*
+		//print "NO RESULTS" if there are no results for the query
+	  	if(!hasResults)
+	  		System.out.print("NO RESULTS");
+*/
+	}
+	
+	//process dict file to find the postings
+	public static void processDict(ArrayList<String> tokens, ArrayList<Weight> acc) throws IOException, FileNotFoundException
+	{
+		//open dict file
+		RandomAccessFile dictFile = new RandomAccessFile(DICTFILENAME, "r");
+		
+		//look up tokens in dict file
+		for(String t: tokens)
+		{
+		  	//shorten token processing
+		  	String token = shortenToken(t);
+
+		  	//find and seek to location in dict file
+			long loc = hashfunction(token, DICTRECORDSNUM) * DICTRECORDSIZE;
+			dictFile.seek(loc);
+
+			//linear probe through hashtable until the token or blanktoken is encountered
+			String dictToken;
+			long dictNumDocs, dictStart;
+			do
+			{
+			  	//read line and get the token, numdocs, and start
+				String dictLine = dictFile.readLine();
+				String[] splitDictLine = dictLine.split("\\s+");
+				dictToken = splitDictLine[0];
+				dictNumDocs = Long.parseLong(splitDictLine[1]);
+				dictStart = Long.parseLong(splitDictLine[2]);
+
+				//if end of file go back to beginning of file
+				if(dictFile.getFilePointer() >= dictFile.length())
+					dictFile.seek(0);
+			} while(!dictToken.equals(token) && !dictToken.equals(BLANKTOKEN));
+
+			//process postings and add term weights to accumulator
+			if(dictToken.equals(token))
+				processPostings(dictNumDocs, dictStart, acc);
+		}
+
+		//close dict file
+		dictFile.close();
+	}
+	
+	//processes the postings and adds term weights to the accumulator
+	public static void processPostings(long numDocs, long start, ArrayList<Weight> acc) throws IOException, FileNotFoundException
+	{
+	  	//open post file
+		RandomAccessFile postFile = new RandomAccessFile(POSTFILENAME, "r");
+
+		//find and seek to location in post file
+		long loc = start * POSTRECORDSIZE;
+		postFile.seek(loc);
+
+		//add weights to accumulator
+		for(int i = 0; i < numDocs; i++)
+		{
+		  	//read line and get the docid and weight
+			String postLine = postFile.readLine();
+			String[] splitPostLine = postLine.split("\\s+");
+			int docId = Integer.parseInt(splitPostLine[0]);
+			long weight = Long.parseLong(splitPostLine[1]);
+
+			//add weight to acc[docid]
+			long newWeight = weight + acc.get(docId).weight;
+			acc.get(docId).weight = newWeight;
+		}
+
+		//close post file
+		postFile.close();
+	}
+	
+	//shortens the token to length 20 if greater than length 20
+	public static String shortenToken(String token)
+	{
+	  	long maxTokenLength = 20;
+		String shorterToken;
+		
+		if(token.length() > maxTokenLength)
+			shorterToken = token.substring(0, 10) + 
+				token.substring(token.length()-10, token.length()); 
+		else
+			shorterToken = token;
+
+		return shorterToken;
+	}
+	
+	//calculates hashfunction on the token and returns index location
+	public static long hashfunction(String token, long numDictRecords)
+	{
+		long sum = 0;
+		int index;
+		
+		//hashfunction - add all the characters of the key together
+		for(int i = 0; i < token.length(); i++)
+			sum = sum * 19 + token.charAt(i);	//multiply sum by 19 and add byte value of character
+		if(sum < 0)								//if calculation of sum was negative, make it positive
+			sum = sum * -1;
+		
+		index = (int) (sum % numDictRecords);
+
+		return index;
+	}
+
+	//Weight class to store the docid and the weight of the accumulator
+	public static class Weight implements Comparable<Weight>
+	{
+		public int docid;
+		public long weight;
+
+		public Weight(int docid, long weight)
+		{
+			this.docid = docid;
+			this.weight = weight;
+		}
+
+		@Override
+		public int compareTo(Weight other) {
+		  	if(this.weight < other.weight)
+		  		return -1;
+		  	else if(this.weight == other.weight)
+		  		return 0;
+		  	else
+		  		return 1;
+		}
+	}
+}
+
+PARSER_END(Retrieve)
+
+//handles HTML tags and similar
+SKIP:
+{
+	//special cases
+	< ("<")+ ~["!", "a"-"z", "A"-"Z", "<", "/", "?"] >	// "<" not followed immediately by a letter is not an html tag
+| 	< "&" (["#", "a"-"z", "A"-"Z"])+ ";" >	//removes HTML entities (e.g. &nbsp;)
+
+  	//ignores everything
+| 	"<!--": IN_COMMENTS					//ignores comments
+|	"<script": IN_SCRIPT				//ignores everything between script tags
+|	"<noscript" : IN_NOSCRIPT			//ignores everything between noscript tags
+|	"<style": IN_STYLE					//I'm fashionable!
+| 	< ("<")+ >: IN_HTML					//ignores all other html (<<html> counts) 
+
+|	< OTHER: ~["a"-"z", "A"-"Z", "0"-"9"] >	//ignore non-alphanumeric chars
+| 	< CHAR1: < CHAR > >	//ignore single characters
+
+	//ignore numbers with commas and colons
+|	< (< NUM >)+ (("," | ":") (< NUM >)+)+ >
+
+}
+
+//skip everything in comments - <!-- to -- >
+< IN_COMMENTS > SKIP:
+{
+	"-->": DEFAULT
+| 	< ~[] >
+}
+
+//skip everything in scripts - <script> to </script>
+< IN_SCRIPT > SKIP:
+{
+	"</script>": DEFAULT
+|	< ~[] >
+}
+
+//skip everything in noscripts - <noscript> to </noscript>
+< IN_NOSCRIPT > SKIP:
+{
+	"</noscript>": DEFAULT
+|	< ~[] >
+}
+
+//skip everything in styles - <style> to </style> 
+< IN_STYLE > SKIP:
+{
+	"</style>": DEFAULT
+|	< ~[] >
+}
+
+//skip everything between html tags < to >
+< IN_HTML > SKIP:
+{
+ 	">": DEFAULT
+| 	< ~[] >
+}
+
+TOKEN:
+{
+  	//phone numbers in the format of 111-111-1111, (111)111-1111, (111) 111-1111, or 111 111-1111
+  	< PHONE_NUM: (< NUM >){3} "-" (< NUM >){3} "-" (< NUM >){4}
+  				| "(" (< NUM >){3} ")" (< NUM >){3} "-" (< NUM >){4}
+  				| "(" (< NUM >){3} ") " (< NUM >){3} "-" (< NUM >){4}
+  				| (< NUM >){3} " " (< NUM >){3} "-" (< NUM >){4} >
+
+  	//URL cases outside of <a href>
+  	//note: urls without a prefix (google.com instead of www.google.com) are covered by < TEXT >
+|	< URL: ("http" | "www") (~[" ", "\n", "\r", "\t", "<"])* >
+
+	//numbers with forward slashes (e.g. dates)
+|	< NUM_SLASH : (< NUM >)+ ("/" (< NUM >)+)+ >
+	
+	//all other text
+|  	< TEXT: < CHAR > ((< PUNC_INTEXT >)* (< CHAR >)+)+ >
+|  	< #CHAR: ["A"-"Z", "a"-"z", "0"-"9"] >
+| 	< #NUM: ["0"-"9"] >
+| 	< #PUNC_INTEXT: "-" | "." | "@" | "\'" | "_" >
+
+	//deals with stuff like <b>sgauch</b>@uark.edu or h<sub>2</sub>o
+| 	< FORMATTED_TEXT: < TEXT > ((< FORMATTING >)+ (< PUNC_INTEXT >)* < TEXT >)+ >
+| 	< #FORMATTING: "<b>" | "<em>" | "<i>" | "<small>" | "<strong>"
+				| "<sub>" | "<sup>" | "<ins>" | "<del>" | "<mark>"
+				| "</b>" | "</em>" | "</i>" | "</small>" | "</strong>"
+				| "</sub>" | "</sup>" | "</ins>" | "</del>" | "</mark>" >
+}
+
+//read tokens and adds them to arraylist tokens
+void Start(ArrayList<String> tokens):
+{
+  	Token t;
+  	String a;
+}
+{
+	(
+	  	//all other text (in or outside of brackets)
+	  	(
+		  	(t = < TEXT > | t = < PHONE_NUM > | t = < NUM_SLASH >)
+		  	{
+		  	  	a = t.image.toLowerCase();
+		  		tokens.add(a);
+	  		}
+		)
+		|
+		//deals with stuff like <b>sgauch</b>@uark.edu or h<sub>2</sub>o
+		(
+		  	(t = < FORMATTED_TEXT >)
+		  	{
+		  	  	a = t.image.toLowerCase();
+		  	  	a = a.replaceAll("<.*?>", "");
+		  	  	tokens.add(a);
+		  	}
+		)
+		|
+		//do not lowercase URLs
+		(
+		  	(t = < URL >)
+		  	{
+		  	  	a = t.image;
+		  		tokens.add(a);
+		  	}
+		) 
+	)*
+	< EOF >
+}
